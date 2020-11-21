@@ -18,7 +18,7 @@ def makeLdVcf(pruneIN, orgVCF, prefix):
         for line in fd:
             line=line.strip()
             L.append(line)
-    with open('prune.filtered.vcf', 'a') as fh:
+    with open('%s.vcf' % sys.argv[3], 'a') as fh:
         with open (pruneIN, 'r') as fd:
             for line in fd:
                 line=line.strip()

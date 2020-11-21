@@ -963,6 +963,7 @@ if [[ $1 == "filter" ]] && [[ $# -gt 1 ]]; then
     while getopts "$filter_options" opt; do
         case "$opt" in
             h) usage_filter; exit 0;;
+            r) ref=${OPTARG};;
             v) vcf=${OPTARG};;
             c) var=${OPTARG};;
             k) ale=${OPTARG};;
@@ -1041,13 +1042,13 @@ if [[ $1 == "filter" ]] && [[ $# -gt 1 ]]; then
     fi
 
     if [[ "$var" == "SNP" ]]; then
-        java -jar "$runGATK_path"/../tools/gatk.jar -T SelectVariants -R "$ref" -V "$vcf" -selectType "$var" -restrictAllelesTo '$ale' -ef -env -noTrim -o "$od/$pfx.$ale.vcf" -nt $thd;
+        java -jar "$runGATK_path"/../tools/gatk.jar -T SelectVariants -R "$ref" -V "$vcf" -selectType "$var" -restrictAllelesTo "$ale" -ef -env -noTrim -o "$od/$pfx.$ale.vcf" -nt $thd;
         bcftools filter -e 'DP<10 || QD<2.0 || MQ<40.0 || FS>60.0 || MQRankSum<-12.5 || ReadPosRankSum<-8.0' "$od/$pfx.$ale.vcf" > "$od/$pfx.$ale.tmp.vcf";
     else
         java -jar "$runGATK_path"/../tools/gatk.jar -T SelectVariants -R "$ref" -V "$vcf" -selectType "$var" -ef -env -noTrim -o "$od/$pfx.$ale.vcf" -nt $thd;
         bcftools filter -e 'DP<10 || QD<2.0 || SOR>10.0 || FS>200.0 || InbreedingCoeff<-0.8 || ReadPosRankSum<-20.0' "$od/$pfx.$ale.vcf" > "$od/$pfx.$ale.tmp.vcf";
     fi
-    awk 'BEGIN{OFS="\t"}''substr ($0, 1, 1) == "#" || $3=$1"_"$2 {print}' $myVCF > "$od/$pfx.$ale.hardfiltered.final.vcf";
+    awk 'BEGIN{OFS="\t"}''substr ($0, 1, 1) == "#" || $3=$1"_"$2 {print}' "$od/$pfx.$ale.tmp.vcf" > "$od/$pfx.$ale.hardfiltered.final.vcf";
     rm -rf "$od/$pfx.$ale.tmp.vcf";
 
     echo "[$(date +"%T")] filtering ends ..."; exit 0;
@@ -1063,7 +1064,7 @@ fi
 
 if [[ $1 == "prune" ]] && [[ $# -gt 1 ]]; then
     shift;
-    prune_options=':hr:v:c:k:t:p:o:';
+    prune_options=':hr:v:f:g:m:d:c:r:p:o:';
     while getopts "$prune_options" opt; do
         case "$opt" in
             h) usage_prune; exit 0;;
@@ -1133,7 +1134,7 @@ if [[ $1 == "prune" ]] && [[ $# -gt 1 ]]; then
     check_path "$od"; cd "$od"
  
     echo "[$(date +"%T")] start pruning ..."
-    if [[ "$min" -eq 0 ]]; then
+    if [[ "$min" == 0 ]]; then
         "$runGATK_path"/../tools/plink --vcf "$vcf" --maf $maf --geno $gen --make-bed --out "$pfx" --allow-no-sex --allow-extra-chr --double-id --indep-pairwise $dis $cen $r2
     else
         "$runGATK_path"/../tools/plink --vcf "$vcf" --maf $maf --geno $gen --mind $min --make-bed --out "$pfx" --allow-no-sex --allow-extra-chr --double-id --indep-pairwise $dis $cen $r2
