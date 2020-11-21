@@ -1,0 +1,1203 @@
+#!/bin/bash  
+
+# This script aims to help run variant calling and filtering in a flexible way using GATK3 and plink 
+# ScriptName: runGATK3
+# Created date: 18/06/2019
+# Last modified: 21/11/2020
+# Notes: v1.0 is the initial version
+# Copyright: Copyright (c) 2019 Yuxuan Yuan (yuxuan.yuan@outlook.com)
+
+####      #### ####      ####  #####         #####  ####      ####        #####          #####       ###
+ #  #    #  #  #  #      #  #   #  #        #   #   #  #      #  #       # # # #         # # ##      # #
+  #  #  #  #   #  #      #  #     #  #    #   #     #  #      #  #      # #   # #        # #  ##     # #
+   #   #  #    #  #      #  #       #   #   #       #  #      #  #     # #     # #       # #   ##    # #
+    #  # #     #  #      #  #         # # #         #  #      #  #    # # # # # # #      # #    ##   # #
+     #  #      #  #      #  #       #   #   #       #  #      #  #   # #         # #     # #     ##  # #
+     #  #       #  #* * *# #     #  #     #   #      # #* * *# #    # #           # #    # #      ## # #
+     ####        **********    #####         #####     ********    ###             ###   ###       #####
+
+VERSION=1.0
+###======================================= check this tool ==============================================
+
+RL=`which readlink`;
+
+if [[ ! -x $RL ]]; then
+    echo;
+    echo "Please ensure 'readlink' has been set in your PATH.";
+    echo >&2; exit 1;
+fi
+
+#get the absolute path of runGATK
+
+runGATK=`which $0`;
+if [[ -z "$runGATK" ]]; then
+    runGATK=`$RL -f $0`;
+else
+    runGATK=`$RL -f $(which $BASENAME$0)`;
+fi
+
+runGATK_path=`dirname "$runGATK"`;
+
+if [[ "$runGATK_path" == "." ]]; then
+    echo;
+    echo "Please give an excutive permission to `basename $0`";
+    echo; exit 1;
+fi
+
+###========================================== functions ================================================
+
+usage_global(){
+
+echo "
+----------------------------------------------------------------------------------------------
+Program: `basename $0`
+Version: $VERSION
+Author:  Yuxuan Yuan (yuxuan.yuan@outlook.com)
+----------------------------------------------------------------------------------------------
+Synopsis: This pipeline aims to help run variant calling and filtering using GATK3 and plink  
+
+Usage:    `basename $0` <command> [options]
+
+command:  index      index the reference genome 
+          map        map paired-end reads to a reference genome
+          dedup      mark duplication in the mapped file
+          realign    realign sequences to adjust indels in the mapped deduplicated file
+          call       call variant using the realigned file and generate g.vcf files
+          genotype   genotype the g.vcf files
+          combine    combine variants called by chromosomes/pieces together
+          filter     filter the variants called
+          prune      variant (mainly SNPs) prune
+          phylo      produce phylogeny using the pruned SNP vcf file
+
+options: -h/-help   show this message
+----------------------------------------------------------------------------------------------
+"
+}
+
+usage_index(){
+
+echo "
+-----------------------------------------------------------------
+Synopsis: Index the reference genome using bwa or minimap2
+
+Usage:    `basename $0` index [options]
+-----------------------------------------------------------------
+Options: 
+-a <str>  aligner [bwa|minimap2]. Default: bwa
+-r <str>  full path to the reference genome  
+-o <str>  full path to the output directory
+
+-h/-help  display this help and then exit
+-----------------------------------------------------------------
+"
+}
+
+usage_map(){
+
+echo "
+-----------------------------------------------------------------------
+Synopsis: map short reads to the indexed reference for one sample
+
+Usage:    `basename $0` map [options]
+-----------------------------------------------------------------------
+Options:  
+-a <str>  aligner [bwa|minimap2]. Default: bwa
+-1 <str>  full path to read1
+-2 <str>  full path to read2
+-i <str>  individual id
+-l <str>  libarary id
+-s <str>  sample id 
+-r <str>  full path to the index of the reference
+-t <int>  number of threads for alignment 
+-p <str>  prefix of output 
+-o <str>  full path to the output directory
+
+-h/-help  display this help and then exit
+-----------------------------------------------------------------------
+"
+}
+
+usage_dedup(){
+
+echo "
+-------------------------------------------------------------------------
+Synopsis: mark duplication in the mapped reads (.bam) for one sample
+
+Usage:    `basename $0` dedup [options]
+-------------------------------------------------------------------------
+Options:  
+-l <str>  a list contains 'name_of_sample sorted.bam' in each line
+          sorted.bam file needs full path
+-t <int>  number of threads (one sample takes 1 thread)
+-o <str>  full path to the output directory 
+
+-h/-help  display this help and then exit
+-------------------------------------------------------------------------
+"
+}
+
+usage_realign(){
+
+echo "
+-----------------------------------------------------------------------
+Synopsis: realign the reads after marking duplication for one sample
+
+Usage:    `basename $0` realign [options]
+-----------------------------------------------------------------------
+Options:
+-r <str>  full path to the reference genome 
+-d <str>  the deduplicated bam file
+-t <int>  number of threads used for one sample 
+-p <str>  prefix of output
+-o <str>  full path to the output directory 
+
+-h/-help  display this help and then exit
+-----------------------------------------------------------------------
+"
+}
+
+usage_call(){
+
+echo "
+-----------------------------------------------------------------------
+Synopsis: haplotype calling using the realigned reads for one sample
+
+Usage:    `basename $0` call [options]
+-----------------------------------------------------------------------
+Options:
+-r <str>  full path to the reference genome 
+-R <str>  full path to the realigned bam file 
+-t <int>  number of threads used for one sample
+-p <str>  prefix of output
+-o <str>  full path to the output directory 
+
+-h/-help  display this help and then exit
+-----------------------------------------------------------------------
+"
+}
+
+usage_genotype(){
+
+echo "
+----------------------------------------------------------------------------------
+Synopsis: SNP and/or Indel calling for all samples 
+
+Usage:    `basename $0` genotype [options]
+----------------------------------------------------------------------------------
+Options:
+-r <str>  full path to the reference genome
+-b <str>  a batch file containing g.vcf files with full paths to genotype
+-i <str>  an interval file containing chromosome and/or positions to genotype
+          if not given. Call all positions.
+-p <str>  prefix of the output
+-t <int>  number of threads for the whole analysis
+-o <str>  full path to the output directory 
+
+-h/-help  display this help and then exit
+----------------------------------------------------------------------------------
+"
+}
+
+usage_combine(){
+
+echo "
+----------------------------------------------------------------------------
+Synopsis: combine variants called by chromosomes/pieces together 
+
+Usage:    `basename $0` combine [options]
+----------------------------------------------------------------------------
+Options:
+-r <str>  full path to the reference genome
+-l <str>  a list file containing full path vcf files that will be combined
+          vcf file must be sorted by cond  
+-p <str>  prefix of the output
+-o <str>  full path to the output directory
+
+-h/-help  display this help and then exit
+----------------------------------------------------------------------------
+"
+}
+
+usage_filter(){
+
+echo "
+----------------------------------------------------------------------------
+Synopsis: filter the variants called
+
+Usage:    `basename $0` filter [options]
+----------------------------------------------------------------------------
+Options:
+-r <str>  full path to the reference genome
+-v <str>  full path to the vcf file
+-c <str>  variant type that will be retained [SNP|INDEL]. Default: SNP
+-k <str>  if SNP is selected, which allel type that will be kept 
+          [ALL|BIALLELIC|MULTIALLELIC]. Default: BIALLELIC
+-t <str>  number of threads
+-p <str>  prefix of the output
+-o <str>  full path to the output directory
+
+-h/-help  display this help and then exit
+----------------------------------------------------------------------------
+"
+}
+
+usage_prune(){
+
+echo "
+-------------------------------------------------------------------------------
+Synopsis: variants (mainly SNPs) prune 
+
+Usage:    `basename $0` prune [options]
+-------------------------------------------------------------------------------
+Options:
+-v <str>  full path to the vcf file
+-f <flt>  minor allele frequency (maf). Default: 0.05
+          Explain: if a SNP shows variation in only 5 of the 100 individuals, 
+          it is not useful statistically and should be removed
+-g <flt>  genotype (geno) rate. Default: 0.1
+          Explain: suppose we have 100 samples and the missingness rate is 0.1
+          So if a SNP is missing in 100 x 0.1 =10 or more samples, that SNP 
+          will be removed from the dataset
+-m <flt>  mind value. Default: 0.1. May ignore this by input 0.
+          Explain: if your samples are very close to each other, users may use
+          the default 0.1. Otherwise, set it based on the diverge
+-d <int>  pairwise distance (kb) to perform LD decay. Default: 50
+-c <int>  pairwise distance variant ct to perform LD decay. Default: 10
+-r <flt>  r^2 value to perform LD decay. Default: 0.2
+-p <str>  prefix of the output
+-o <str>  full path to the output directory
+
+-h/-help  display this help and then exit
+-------------------------------------------------------------------------------
+"
+}
+
+usage_phylo(){
+
+echo "
+-------------------------------------------------------------------------------
+Synopsis: produce phylogeny using the pruned SNP vcf file by IQ-Tree
+
+Usage:    `basename $0` phylo [options]
+-------------------------------------------------------------------------------
+Options:
+-v <str>  full path to the pruned vcf file
+-t <str>  number of threads
+-p <str>  prefix of the output
+-o <str>  full path to the output directory
+
+-h/-help  display this help and then exit
+-------------------------------------------------------------------------------
+"
+}
+
+
+check_path(){
+    myDir=`$RL -f $1`;
+    if [[ ! -d "$myDir" ]] || [[ ! -w "$myDir" ]]; then
+        echo; 
+        echo "Opps! It seems the output directory is not existent or writable, please check!";
+        echo; exit 1;
+    fi
+}
+
+check_tool(){
+    which $1 >/dev/null 2>&1;
+    if [[ $? != 0 ]]; then
+        echo;
+        echo "Opps! '$1' is not in the PATH. Please check!";
+        echo; exit 1;
+    fi
+    mytool=`$RL -f $(which $1)`;
+    if [[ ! -s "$mytool" ]] || [[ ! -x "$mytool" ]]; then
+        echo;
+        echo "Opps! It seems '$1' is not executable. Please check!";
+        echo; exit 1;
+    fi
+}
+
+check_integer(){
+    if ! [[  $1 =~ ^[0-9]+$ ]]; then
+        echo;
+        echo "Opps! Your input '$1' is not an integer or smaller than 0. Please check!";
+        echo; exit 1;
+    fi
+}
+
+check_option(){
+    if [[ -z "$1" ]]; then
+        echo;
+        echo "Opps! '$2' option is missing. Please check!";
+        $3; exit 1;
+    fi
+}
+
+check_pylib(){
+    pdlib=`python -c "import imp; imp.find_module('$1')" 2>&1 || true`
+    if [[ ! -z "$pdlib" ]]; then 
+        echo;
+        echo "Opps! It seems python library '$1' is not installed. Please check!";
+        echo; exit 1;
+    fi
+}
+
+###========================================== program ================================================
+##Print help if no args input
+
+if [[ $# -eq 0 ]]; then
+    usage_global;
+    exit 0;
+fi
+
+##Check the first arg
+if [[ $1 != "index" ]] && [[ $1 != "map" ]] && [[ $1 != "dedup" ]] && [[ $1 != "realign" ]] && [[ $1 != "call" ]] && \
+[[ $1 != "genotype" ]] && [[ $1 != "combine" ]] && [[ $1 != "filter" ]] && [[ $1 != "prune" ]] && [[ $1 != "phylo" ]];  then
+    if [[ $1 == "-h" ]] || [[ $1 == "-help" ]] || [[ $1 == "--help" ]]; then
+        usage_global;
+        exit 0;
+	else
+        echo -e "\nOpps! Unknown command '$1'";
+        echo -e "Please check '`basename $0` -h' and continue ...";
+        echo; exit 1;
+    fi
+fi
+        
+##====================================== Select "index" option ========================================
+##Print help if only select "index" 
+
+if [[ $1 == "index" ]] && [[ $# -eq 1 ]]; then
+    usage_index;
+    exit 0;
+fi
+
+if [[ $1 == "index" ]] && [[ $# -gt 1 ]]; then
+	shift;
+	index_options=':ha:r:t:o:';
+	while getopts "$index_options" opt; do
+        case "$opt" in
+            h) usage_index; exit 0;;
+            a) agn=${OPTARG};;
+            r) ref=${OPTARG};;
+            o) od=${OPTARG};;
+            \?) echo;echo -e "Oops! Unknown option '-$OPTARG'">&2; echo "Please check '`basename $0` index -h' and continue..."; echo; exit 0;;
+            :) echo;echo -e "Missing option argument for '-$OPTARG'. Please check!">&2; echo; exit 1;;
+        esac
+    done
+    shift "$((OPTIND - 1))"
+
+    if [[ -z "$agn" ]]; then
+        agn="bwa";
+    fi
+
+    ##Check options
+    check_option "$agn" -a usage_index; check_option "$ref" -r usage_index; check_option "$od" -o usage_index;
+
+    ##Check aligner
+    if [[ "$agn" != "bwa" ]] && [[ "$agn" != "minimap2" ]]; then
+        echo;
+        echo "Please use 'bwa' or 'minimap2' as your aligner.";
+        echo; exit 1;
+    fi
+
+    ##Check reference
+    ref=`$RL -f "$ref"`
+    if [[ ! -s "$ref" ]] || [[ ! -r "$ref" ]];then
+        echo;
+        echo "Oops! It seems the reference file is not existent or readable. Please check!";
+        echo; exit 1;
+	fi
+
+    ##Check outDir
+    last_chr="${od: -1}"
+    if [[ "$last_chr" == "/" ]]; then
+        od="${od%?}";
+    fi
+    if [[ "$od" == "." ]];then
+        od=$PWD;
+    elif [[ ${od: -2} == ".." ]];then
+        od="$PWD/$od";
+    fi
+    check_path "$od"; 
+
+    ##Check tools
+    check_tool java; check_tool samtools;
+    if [[ "$agn" == "bwa" ]]; then
+        check_tool bwa;
+    else
+        check_tool minimap2;
+    fi
+
+    echo "[$(date +"%T")] start indexing ..."
+
+    ##picard index
+    if [[ ! -s "${ref%.*}.dict" ]]; then
+        java -jar $runGATK_path/../tools/picard.jar CreateSequenceDictionary R="$ref" O=${ref%.*}.dict > "$od/index.log" 2>&1;
+    fi
+    ##samtools index 
+    if [[ ! -s "${ref%.*}.fai" ]]; then
+        samtools faidx "$ref" >> "$od/index.log" 2>&1;
+    fi
+
+    if [[ "$agn" == "bwa" ]]; then
+        bwa index "$ref" >> "$od/index.log" 2>&1;
+    else
+        minimap2 -x sr -d ${ref%.*}.mini "$ref" >> "$od/index.log" 2>&1;
+    fi
+
+    echo "[$(date +"%T")] indexing ends ..."; exit 0;	
+fi
+
+##======================================= Select "map" option =========================================
+##Print help if only select "map" 
+
+if [[ $1 == "map" ]] && [[ $# -eq 1 ]]; then
+    usage_map;
+    exit 0;
+fi
+
+if [[ $1 == "map" ]] && [[ $# -gt 1 ]]; then
+	shift;
+	map_options=':ha:1:2:i:l:s:r:t:p:o:';
+	while getopts "$map_options" opt; do
+        case "$opt" in
+            h) usage_map; exit 0;;
+            a) agn=${OPTARG};;
+            1) fw=${OPTARG};;
+            2) rv=${OPTARG};;
+            i) idv=${OPTARG};;
+            l) lib=${OPTARG};;
+            s) smp=${OPTARG};;
+            r) ref=${OPTARG};;
+            t) thd=${OPTARG};;
+            p) pfx=${OPTARG};;
+            o) od=${OPTARG};;
+            \?) echo;echo -e "Oops! Unknown option '-$OPTARG'">&2; echo "Please check '`basename $0` map -h' and continue..."; echo; exit 0;;
+            :) echo;echo -e "Missing option argument for '-$OPTARG'. Please check!">&2; echo; exit 1;;
+        esac
+    done
+    shift "$((OPTIND - 1))"  
+
+    if [[ -z "$agn" ]]; then
+        agn="bwa";
+    fi
+
+    ##Check options
+    check_option "$agn" -a usage_map; check_option "$fw" -1 usage_map; check_option "$rv" -2 usage_map; check_option "$idv" -i usage_map; 
+    check_option "$lib" -l usage_map; check_option "$smp" -s usage_map; check_option "$ref" -r usage_map; check_option "$thd" -t usage_map;
+    check_option "$pfx" -p usage_map; check_option "$od" -o usage_map;
+
+
+    ##Check reference
+    ref=`$RL -f "$ref"`
+    if [[ ! -s "$ref" ]] || [[ ! -r "$ref" ]];then
+        echo;
+        echo "Oops! It seems the reference file is not existent or readable. Please check!";
+        echo; exit 1;
+	fi
+
+    ##Check forward reads
+    fw=`$RL -f "$fw"`
+	if [[ ! -s "$fw" ]] || [[ ! -r "$fw" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${fw}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+
+    ##Check reverse reads
+    rv=`$RL -f "$rv"`
+    if [[ ! -s "$rv" ]] || [[ ! -r "$rv" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${rv}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+
+    ##Check threads 
+    check_integer "$thd"
+
+    ##Check outDir
+    last_chr="${od: -1}"
+    if [[ "$last_chr" == "/" ]]; then
+        od="${od%?}";
+    fi
+    if [[ "$od" == "." ]];then
+        od=$PWD;
+    elif [[ ${od: -2} == ".." ]];then
+        od="$PWD/$od";
+    fi
+    check_path "$od"; 
+
+    ##Check tools
+    check_tool samtools;
+    if [[ "$agn" == "bwa" ]]; then
+        check_tool bwa;
+    else
+        check_tool minimap2;
+    fi
+
+    echo "[$(date +"%T")] start mapping ..."
+
+    ##Check index 
+    if [[ "$agn" == "bwa" ]]; then
+        if [[ ! -s $ref.bwt ]] && [[ ! -s $ref.sa ]] && [[ ! -s $ref.pac ]] && [[ ! -s $ref.ann ]] && [[ ! -s $ref.amb ]]; then
+            "$runGATK_path/`basename $0`" index -a "$agn" -r "$ref" -o "$od";
+            if [[ $? != 0 ]]; then
+                echo;
+                echo "Opps! Something is wrong in indexing. Please check '$od/index.log'.";
+                echo; exit 1;
+            else
+                bwa mem -M -R "@RG\tID:$idv\tLB:$lib\tPL:ILLUMINA\tPM:HISEQ\tSM:$smp" -t "$thd" "$ref" "$fw" "$rv" | samtools view -@ "$((thd -1))" -Sb - | samtools sort -@ "$((thd -1))" -o "$od/$pfx.srt.bam" - && samtools index "$od/$pfx.srt.bam";
+            fi
+        else
+            bwa mem -M -R "@RG\tID:$idv\tLB:$lib\tPL:ILLUMINA\tPM:HISEQ\tSM:$smp" -t "$thd" "$ref" "$fw" "$rv" | samtools view -@ "$((thd -1))" -Sb - | samtools sort -@ "$((thd -1))" -o "$od/$pfx.srt.bam" - && samtools index "$od/$pfx.srt.bam";
+        fi
+    else
+        mkdir -p "$od/tmp";
+        minimap2 -t "$thd" -ax sr -R "@RG\tID:$idv\tLB:$lib\tPL:ILLUMINA\tPM:HISEQ\tSM:$smp" --split-prefix "$od/tmp/$pfx.tmp" "$ref" "$fw" "$rv" | samtools view -@ "$((thd -1))" -Sb - | samtools sort -@ "$((thd -1))" -o "$od/$pfx.srt.bam" -;
+        samtools index "$od/$pfx.srt.bam";
+        rm -rf "$od/tmp";
+    fi
+
+    echo "[$(date +"%T")] mapping ends ..."; exit 0;
+fi
+
+##====================================== Select "dedup" option ========================================
+##Print help if only select "dedup" 
+
+if [[ $1 == "dedup" ]] && [[ $# -eq 1 ]]; then
+    usage_dedup;
+    exit 0;
+fi
+
+if [[ $1 == "dedup" ]] && [[ $# -gt 1 ]]; then
+    shift;
+    dedup_options=':hl:t:o:';
+    while getopts "$dedup_options" opt; do
+        case "$opt" in
+            h) usage_dedup; exit 0;;
+            l) lst=${OPTARG};;
+            t) thd=${OPTARG};;
+            o) od=${OPTARG};;
+            \?) echo;echo -e "Oops! Unknown option '-$OPTARG'">&2; echo "Please check '`basename $0` dedup -h' and continue..."; echo; exit 0;;
+            :) echo;echo -e "Missing option argument for '-$OPTARG'. Please check!">&2; echo; exit 1;;
+        esac
+    done
+    shift "$((OPTIND - 1))"
+
+    ##Check options 
+    check_option "$lst" -l usage_dedup; check_option "$thd" -t usage_dedup; check_option "$od" -o usage_dedup;
+
+    ##Check list
+    lst=`$RL -f "$lst"`;
+    if [[ ! -s "$lst" ]] || [[ ! -r "$lst" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${lst}' is not existent or readable. Please check!";
+        echo; exit 1;
+	fi
+
+    ##Check threads
+    check_integer "$thd";
+
+    ##Check outDir
+    last_chr="${od: -1}"
+    if [[ "$last_chr" == "/" ]]; then
+        od="${od%?}";
+    fi
+    if [[ "$od" == "." ]];then
+        od=$PWD;
+    elif [[ ${od: -2} == ".." ]];then
+        od="$PWD/$od";
+    fi
+    check_path "$od";     
+
+    ##Check tools
+    check_tool python; check_tool samtools; check_tool java; check_tool ParaFly;
+
+    ##Check python lib 
+    check_pylib numpy; check_pylib pandas;
+
+    echo "[$(date +"%T")] start marking duplication ..."
+    python "$runGATK_path"/../src/makeDedupCMD.py "$lst" "$runGATK_path" "$od" > "$od/dedup.cmd";
+    ParaFly -CPU "$thd" -c "$od/dedup.cmd";
+    rm -rf "$od/dedup.cmd";
+    echo "[$(date +"%T")] Marking duplication ends ..."; exit 0; 
+fi
+
+##===================================== Select "realign" option =======================================
+##Print help if only select "realign" 
+
+if [[ $1 == "realign" ]] && [[ $# -eq 1 ]]; then
+    usage_realign;
+    exit 0;
+fi
+
+if [[ $1 == "realign" ]] && [[ $# -gt 1 ]]; then
+    shift;
+    realign_options=':hr:d:t:p:o:';
+    while getopts "$realign_options" opt; do
+        case "$opt" in
+            h) usage_realign; exit 0;;
+            r) ref=${OPTARG};;
+            d) dedup=${OPTARG};;
+            t) thd=${OPTARG};;
+            p) pfx=${OPTARG};;
+            o) od=${OPTARG};;
+            \?) echo;echo -e "Oops! Unknown option '-$OPTARG'">&2; echo "Please check '`basename $0` realign -h' and continue..."; echo; exit 0;;
+            :) echo;echo -e "Missing option argument for '-$OPTARG'. Please check!">&2; echo; exit 1;;
+        esac
+    done
+    shift "$((OPTIND - 1))"
+
+    ##Check options 
+    check_option "$ref" -r usage_realign; check_option "$dedup" -d usage_realign; check_option "$thd" -t usage_realign; 
+    check_option "$pfx" -p usage_realign; check_option "$od" -o usage_realign;
+
+    ##Check ref
+    ref=`$RL -f "$ref"`;
+    if [[ ! -s "$ref" ]] || [[ ! -r "$ref" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${ref}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+    
+    ##Check dedup
+    dedup=`$RL -f "$dedup"`;
+    if [[ ! -s "$dedup" ]] || [[ ! -r "$dedup" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${dedup}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+
+    ##Check threads
+    check_integer "$thd";
+
+    ##Check outDir
+    last_chr="${od: -1}"
+    if [[ "$last_chr" == "/" ]]; then
+        od="${od%?}";
+    fi
+    if [[ "$od" == "." ]];then
+        od=$PWD;
+    elif [[ ${od: -2} == ".." ]];then
+        od="$PWD/$od";
+    fi
+    check_path "$od";  
+
+    ##Check tools
+    check_tool java; check_tool samtools;
+
+    echo "[$(date +"%T")] start realigning ..."
+    
+    if [[ ! -s "${ref%.*}.dict" ]]; then 
+        java -jar "$runGATK_path"/../tools/picard.jar CreateSequenceDictionary R="$ref" O="${ref%.*}.dict";
+    fi
+    
+    if [[ ! -s "${ref%.*}.dict" ]]; then
+        samtools faidx "$ref";
+    fi
+
+    java -jar "$runGATK_path"/../tools/gatk.jar -T RealignerTargetCreator -fixMisencodedQuals -R "$ref" -I "$dedup" -o "$od/$pfx.intervals" -nt "$thd";
+    java -jar "$runGATK_path"/../tools/gatk.jar -T IndelRealigner -fixMisencodedQuals -R "$ref" -I "$dedup" -targetIntervals "$od/$pfx.intervals" -o "$od/$pfx.realigned.bam";
+    
+    echo "[$(date +"%T")] realigning ends ..."; exit 0;
+
+fi
+
+##====================================== Select "call" option =========================================
+##Print help if only select "call" 
+
+if [[ $1 == "call" ]] && [[ $# -eq 1 ]]; then
+    usage_call;
+    exit 0;
+fi
+
+if [[ $1 == "call" ]] && [[ $# -gt 1 ]]; then
+    shift;
+    call_options=':hr:R:t:p:o:';
+    while getopts "$call_options" opt; do
+        case "$opt" in
+            h) usage_call; exit 0;;
+            r) ref=${OPTARG};;
+            R) rlg=${OPTARG};;
+            t) thd=${OPTARG};;
+            p) pfx=${OPTARG};;
+            o) od=${OPTARG};;
+            \?) echo;echo -e "Oops! Unknown option '-$OPTARG'">&2; echo "Please check '`basename $0` call -h' and continue..."; echo; exit 0;;
+            :) echo;echo -e "Missing option argument for '-$OPTARG'. Please check!">&2; echo; exit 1;;
+        esac
+    done
+    shift "$((OPTIND - 1))"
+
+    ##Check options 
+    check_option "$ref" -r usage_call; check_option "$rlg" -R usage_call; check_option "$thd" -t usage_call; 
+    check_option "$pfx" -p usage_call; check_option "$od" -o usage_call;
+
+    ##Check ref
+    ref=`$RL -f "$ref"`;
+    if [[ ! -s "$ref" ]] || [[ ! -r "$ref" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${ref}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+    
+    ##Check realigned bam
+    rlg=`$RL -f "$rlg"`;
+    if [[ ! -s "$rlg" ]] || [[ ! -r "$rlg" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${rlg}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+
+    ##Check threads
+    check_integer "$thd";
+
+    ##Check outDir
+    last_chr="${od: -1}"
+    if [[ "$last_chr" == "/" ]]; then
+        od="${od%?}";
+    fi
+    if [[ "$od" == "." ]];then
+        od=$PWD;
+    elif [[ ${od: -2} == ".." ]];then
+        od="$PWD/$od";
+    fi
+    check_path "$od";  
+
+    ##Check tools
+    check_tool java; check_tool samtools;
+
+    echo "[$(date +"%T")] start calling ..."
+    
+    if [[ ! -s "${ref%.*}.dict" ]]; then 
+        java -jar "$runGATK_path"/../tools/picard.jar CreateSequenceDictionary R="$ref" O="${ref%.*}.dict";
+    fi
+    
+    if [[ ! -s "${ref%.*}.dict" ]]; then
+        samtools faidx "$ref";
+    fi
+
+    java -jar "$runGATK_path"/../tools/gatk.jar -T HaplotypeCaller -R "$ref" -I "$rlg" -o "$od/$pfx.g.vcf" -ERC GVCF --variant_index_type LINEAR --variant_index_parameter 128000 -nct "$thd";
+    
+    echo "[$(date +"%T")] calling ends ..."; exit 0;
+fi
+
+##===================================== Select "genotype" option ======================================
+##Print help if only select "genotype" 
+
+if [[ $1 == "genotype" ]] && [[ $# -eq 1 ]]; then
+    usage_genotype;
+    exit 0;
+fi
+
+if [[ $1 == "genotype" ]] && [[ $# -gt 1 ]]; then
+    shift;
+    genotype_options=':hr:b:i:t:p:o:';
+    while getopts "$genotype_options" opt; do
+        case "$opt" in
+            h) usage_genotype; exit 0;;
+            r) ref=${OPTARG};;
+            b) bth=${OPTARG};;
+            i) itv=${OPTARG};;
+            t) thd=${OPTARG};;
+            p) pfx=${OPTARG};;
+            o) od=${OPTARG};;
+            \?) echo;echo -e "Oops! Unknown option '-$OPTARG'">&2; echo "Please check '`basename $0` genotype -h' and continue..."; echo; exit 0;;
+            :) echo;echo -e "Missing option argument for '-$OPTARG'. Please check!">&2; echo; exit 1;;
+        esac
+    done
+    shift "$((OPTIND - 1))"
+
+    ##Check options 
+    check_option "$ref" -r usage_genotype; check_option "$bth" -b usage_genotype; check_option "$thd" -t usage_genotype; 
+    check_option "$od" -o usage_genotype; 
+
+    ##Check ref
+    ref=`$RL -f "$ref"`;
+    if [[ ! -s "$ref" ]] || [[ ! -r "$ref" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${ref}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+    
+    ##Check batch 
+    bth=`$RL -f "$bth"`;
+    if [[ ! -s "$bth" ]] || [[ ! -r "$bth" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${bth}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+
+    ##Check intervals file 
+    if [[ ! -z "$itv" ]]; then 
+        itv=`$RL -f "$itv"`;
+        if [[ ! -s "$itv" ]] || [[ ! -r "$itv" ]];then
+            echo;
+            echo "Oops! It seems the sequence file: '${itv}' is not existent or readable. Please check!";
+            echo; exit 1;
+        fi 
+    fi 
+
+    ##Check threads
+    check_integer "$thd";
+
+    ##Check outDir
+    last_chr="${od: -1}"
+    if [[ "$last_chr" == "/" ]]; then
+        od="${od%?}";
+    fi
+    if [[ "$od" == "." ]];then
+        od=$PWD;
+    elif [[ ${od: -2} == ".." ]];then
+        od="$PWD/$od";
+    fi
+    check_path "$od";  
+
+    ##Check tools
+    check_tool java; check_tool samtools;
+
+    echo "[$(date +"%T")] start genotyping ..."
+    
+    if [[ ! -s "${ref%.*}.dict" ]]; then 
+        java -jar "$runGATK_path"/../tools/picard.jar CreateSequenceDictionary R="$ref" O="${ref%.*}.dict";
+    fi
+    
+    if [[ ! -s "${ref%.*}.dict" ]]; then
+        samtools faidx "$ref";
+    fi
+
+    if [[ -z "$itv" ]]; then
+        java -jar "$runGATK_path"/../tools/gatk.jar -T CombineGVCFs -R "$ref" -V "$bth" -o "$od/$pfx.g.vcf";
+        java -jar "$runGATK_path"/../tools/gatk.jar -T GenotypeGVCFs -newQual -V "$od/$pfx.g.vcf" -o "$od/$pfx.vcf" -nt "$thd" -R "$ref";
+    else
+        java -jar "$runGATK_path"/../tools/gatk.jar -T CombineGVCFs -R "$ref" -V "$bth" -L "$itv" -o "$od/$pfx.g.vcf";
+        java -jar "$runGATK_path"/../tools/gatk.jar -T GenotypeGVCFs -newQual -V "$od/$pfx.g.vcf" -o "$od/$pfx.vcf" -nt "$thd" -L "$itv" -R "$ref";
+    fi 
+    echo "[$(date +"%T")] genotyping ends ..."; exit 0;
+fi
+
+##===================================== Select "combine" option ======================================
+##Print help if only select "combine" 
+
+if [[ $1 == "combine" ]] && [[ $# -eq 1 ]]; then
+    usage_combine;
+    exit 0;
+fi
+
+if [[ $1 == "combine" ]] && [[ $# -gt 1 ]]; then
+    shift;
+    combine_options=':hr:l:p:o:';
+    while getopts "$combine_options" opt; do
+        case "$opt" in
+            h) usage_combine; exit 0;;
+            r) ref=${OPTARG};;
+            l) lst=${OPTARG};;
+            p) pfx=${OPTARG};;
+            o) od=${OPTARG};;
+            \?) echo;echo -e "Oops! Unknown option '-$OPTARG'">&2; echo "Please check '`basename $0` combine -h' and continue..."; echo; exit 0;;
+            :) echo;echo -e "Missing option argument for '-$OPTARG'. Please check!">&2; echo; exit 1;;
+        esac
+    done
+    shift "$((OPTIND - 1))"
+
+    ##Check options 
+    check_option "$ref" -r usage_combine; check_option "$lst" -l usage_combine; check_option "$pfx" -p usage_combine; check_option "$od" -o usage_combine; 
+
+    ##Check ref
+    ref=`$RL -f "$ref"`;
+    if [[ ! -s "$ref" ]] || [[ ! -r "$ref" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${ref}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+    
+    ##Check list
+    lst=`$RL -f "$lst"`;
+    if [[ ! -s "$lst" ]] || [[ ! -r "$lst" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${lst}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+
+    ##Check outDir
+    last_chr="${od: -1}"
+    if [[ "$last_chr" == "/" ]]; then
+        od="${od%?}";
+    fi
+    if [[ "$od" == "." ]];then
+        od=$PWD;
+    elif [[ ${od: -2} == ".." ]];then
+        od="$PWD/$od";
+    fi
+    check_path "$od";  
+
+    ##Check tools
+    check_tool java; check_tool samtools;
+
+    echo "[$(date +"%T")] start combining ..."
+    
+    if [[ ! -s "${ref%.*}.dict" ]]; then 
+        java -jar "$runGATK_path"/../tools/picard.jar CreateSequenceDictionary R="$ref" O="${ref%.*}.dict";
+    fi
+    
+    if [[ ! -s "${ref%.*}.dict" ]]; then
+        samtools faidx "$ref";
+    fi
+
+    java -cp "$runGATK_path"/../tools/gatk.jar org.broadinstitute.gatk.tools.CatVariants -R "$ref" -V "$lst" -out "$od/$pfx.vcf" --assumeSorted;
+
+    echo "[$(date +"%T")] combining ends ..."; exit 0;
+
+fi
+
+
+##===================================== Select "filter" option ======================================
+##Print help if only select "filter" 
+
+if [[ $1 == "filter" ]] && [[ $# -eq 1 ]]; then
+    usage_filter;
+    exit 0;
+fi
+
+if [[ $1 == "filter" ]] && [[ $# -gt 1 ]]; then
+    shift;
+    filter_options=':hr:v:c:k:t:p:o:';
+    while getopts "$filter_options" opt; do
+        case "$opt" in
+            h) usage_filter; exit 0;;
+            v) vcf=${OPTARG};;
+            c) var=${OPTARG};;
+            k) ale=${OPTARG};;
+            t) thd=${OPTARG};;
+            p) pfx=${OPTARG};;
+            o) od=${OPTARG};;
+            \?) echo;echo -e "Oops! Unknown option '-$OPTARG'">&2; echo "Please check '`basename $0` filter -h' and continue..."; echo; exit 0;;
+            :) echo;echo -e "Missing option argument for '-$OPTARG'. Please check!">&2; echo; exit 1;;
+        esac
+    done
+    shift "$((OPTIND - 1))"
+
+    ##Check options 
+    check_option "$ref" -r usage_filter; check_option "$vcf" -v usage_filter; check_option "$thd" -p usage_filter;
+    check_option "$pfx" -p usage_filter; check_option "$od" -o usage_filter; 
+
+    ##Check ref
+    ref=`$RL -f "$ref"`;
+    if [[ ! -s "$ref" ]] || [[ ! -r "$ref" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${ref}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+
+    ##Check vcf
+    vcf=`$RL -f "$vcf"`;
+    if [[ ! -s "$vcf" ]] || [[ ! -r "$vcf" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${vcf}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+
+    if [[ -z "$var" ]]; then 
+        var="SNP"
+    fi
+
+    if [[ "$var" != "SNP" ]] && [[ "$var" != "INDEL" ]]; then
+        echo -e "\nOops! Please input 'SNP' or 'INDEL' after '-c'!\n"
+        exit 1;
+    fi
+
+    if [[ "$var" == "SNP" ]]; then
+        if [[ -z "$ale" ]]; then 
+            ale="BIALLELIC"
+        fi 
+        if [[ "$ale" != "ALL" ]] && [[ "$ale" != "BIALLELIC" ]] && [[ "$ale" != "MULTIALLELIC" ]]; then
+            echo -e "\nOops! Please input 'ALL' or 'BIALLELIC' or 'MULTIALLELIC' after '-k'!\n"; 
+            exit 1;
+        fi
+    fi
+
+    ##Check outDir
+    last_chr="${od: -1}"
+    if [[ "$last_chr" == "/" ]]; then
+        od="${od%?}";
+    fi
+    if [[ "$od" == "." ]];then
+        od=$PWD;
+    elif [[ ${od: -2} == ".." ]];then
+        od="$PWD/$od";
+    fi
+    check_path "$od";  
+
+    check_integer $thd;
+
+    check_tool java; check_tool samtools; check_tool bcftools;
+
+    echo "[$(date +"%T")] start filtering ..."
+    
+    if [[ ! -s "${ref%.*}.dict" ]]; then 
+        java -jar "$runGATK_path"/../tools/picard.jar CreateSequenceDictionary R="$ref" O="${ref%.*}.dict";
+    fi
+    
+    if [[ ! -s "${ref%.*}.dict" ]]; then
+        samtools faidx "$ref";
+    fi
+
+    if [[ "$var" == "SNP" ]]; then
+        java -jar "$runGATK_path"/../tools/gatk.jar -T SelectVariants -R "$ref" -V "$vcf" -selectType "$var" -restrictAllelesTo '$ale' -ef -env -noTrim -o "$od/$pfx.$ale.vcf" -nt $thd;
+        bcftools filter -e 'DP<10 || QD<2.0 || MQ<40.0 || FS>60.0 || MQRankSum<-12.5 || ReadPosRankSum<-8.0' "$od/$pfx.$ale.vcf" > "$od/$pfx.$ale.tmp.vcf";
+    else
+        java -jar "$runGATK_path"/../tools/gatk.jar -T SelectVariants -R "$ref" -V "$vcf" -selectType "$var" -ef -env -noTrim -o "$od/$pfx.$ale.vcf" -nt $thd;
+        bcftools filter -e 'DP<10 || QD<2.0 || SOR>10.0 || FS>200.0 || InbreedingCoeff<-0.8 || ReadPosRankSum<-20.0' "$od/$pfx.$ale.vcf" > "$od/$pfx.$ale.tmp.vcf";
+    fi
+    awk 'BEGIN{OFS="\t"}''substr ($0, 1, 1) == "#" || $3=$1"_"$2 {print}' $myVCF > "$od/$pfx.$ale.hardfiltered.final.vcf";
+    rm -rf "$od/$pfx.$ale.tmp.vcf";
+
+    echo "[$(date +"%T")] filtering ends ..."; exit 0;
+fi
+
+##===================================== Select "prune" option ======================================
+##Print help if only select "prune" 
+
+if [[ $1 == "prune" ]] && [[ $# -eq 1 ]]; then
+    usage_prune;
+    exit 0;
+fi
+
+if [[ $1 == "prune" ]] && [[ $# -gt 1 ]]; then
+    shift;
+    prune_options=':hr:v:c:k:t:p:o:';
+    while getopts "$prune_options" opt; do
+        case "$opt" in
+            h) usage_prune; exit 0;;
+            v) vcf=${OPTARG};;
+            f) maf=${OPTARG};;
+            g) gen=${OPTARG};;
+            m) min=${OPTARG};;
+            d) dis=${OPTARG};;
+            c) cen=${OPTARG};;
+            r) r2=${OPTARG};;
+            p) pfx=${OPTARG};;
+            o) od=${OPTARG};;
+            \?) echo;echo -e "Oops! Unknown option '-$OPTARG'">&2; echo "Please check '`basename $0` prune -h' and continue..."; echo; exit 0;;
+            :) echo;echo -e "Missing option argument for '-$OPTARG'. Please check!">&2; echo; exit 1;;
+        esac
+    done
+    shift "$((OPTIND - 1))"
+
+    ##Check options 
+    check_option "$vcf" -v usage_prune; check_option "$pfx" -p usage_prune; check_option "$od" -o usage_prune; 
+
+    ##Check ref
+    vcf=`$RL -f "$vcf"`;
+    if [[ ! -s "$vcf" ]] || [[ ! -r "$vcf" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${vcf}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+
+    if [[ -z "$maf" ]]; then
+        maf=0.05;
+    fi
+
+    if [[ -z "$gen" ]]; then
+        gen=0.1;
+    fi
+
+    if [[ -z "$min" ]]; then 
+        min=0.1;
+    fi 
+
+    if [[ -z "$dis" ]]; then 
+        dis=50;
+    fi 
+    check_integer $dis;
+
+    if [[ -z "$cen" ]]; then 
+        cen=10;
+    fi 
+
+    check_integer $cen;
+
+    if [[ -z "$r2" ]]; then 
+        r2=0.2;
+    fi 
+
+    ##Check outDir
+    last_chr="${od: -1}"
+    if [[ "$last_chr" == "/" ]]; then
+        od="${od%?}";
+    fi
+    if [[ "$od" == "." ]];then
+        od=$PWD;
+    elif [[ ${od: -2} == ".." ]];then
+        od="$PWD/$od";
+    fi
+    check_path "$od"; cd "$od"
+ 
+    echo "[$(date +"%T")] start pruning ..."
+    if [[ "$min" -eq 0 ]]; then
+        "$runGATK_path"/../tools/plink --vcf "$vcf" --maf $maf --geno $gen --make-bed --out "$pfx" --allow-no-sex --allow-extra-chr --double-id --indep-pairwise $dis $cen $r2
+    else
+        "$runGATK_path"/../tools/plink --vcf "$vcf" --maf $maf --geno $gen --mind $min --make-bed --out "$pfx" --allow-no-sex --allow-extra-chr --double-id --indep-pairwise $dis $cen $r2
+    fi
+    sed -i -e 's/:/_/g' "${pfx}.prune.in"
+    python "$runGATK_path"/../src/makeLdVCF.py "${pfx}.prune.in" "$vcf" "$pfx";
+
+    echo "[$(date +"%T")] pruning ends ..."
+fi
+
+##===================================== Select "phylo" option ======================================
+##Print help if only select "phylo" 
+
+if [[ $1 == "phylo" ]] && [[ $# -eq 1 ]]; then
+    usage_phylo;
+    exit 0;
+fi
+
+if [[ $1 == "phylo" ]] && [[ $# -gt 1 ]]; then
+    shift;
+    phylo_options=':hv:t:p:o:';
+    while getopts "$phylo_options" opt; do
+        case "$opt" in
+            h) usage_phylo; exit 0;;
+            v) vcf=${OPTARG};;
+            t) thd=${OPTARG};;
+            p) pfx=${OPTARG};;
+            o) od=${OPTARG};;
+            \?) echo;echo -e "Oops! Unknown option '-$OPTARG'">&2; echo "Please check '`basename $0` phylo -h' and continue..."; echo; exit 0;;
+            :) echo;echo -e "Missing option argument for '-$OPTARG'. Please check!">&2; echo; exit 1;;
+        esac
+    done
+    shift "$((OPTIND - 1))"
+
+    ##Check options 
+    check_option "$vcf" -r usage_phylo; check_option "$od" -o usage_phylo; 
+
+    ##Check ref
+    vcf=`$RL -f "$vcf"`;
+    if [[ ! -s "$vcf" ]] || [[ ! -r "$vcf" ]];then
+        echo;
+        echo "Oops! It seems the sequence file: '${vcf}' is not existent or readable. Please check!";
+        echo; exit 1;
+    fi
+
+    check_integer $thd;
+
+    ##Check outDir
+    last_chr="${od: -1}"
+    if [[ "$last_chr" == "/" ]]; then
+        od="${od%?}";
+    fi
+    if [[ "$od" == "." ]];then
+        od=$PWD;
+    elif [[ ${od: -2} == ".." ]];then
+        od="$PWD/$od";
+    fi
+    check_path "$od"; cd "$od"
+    
+    echo "[$(date +"%T")] generating the newick tree file ..."
+    "$runGATK_path"/../tools/vcf2phylip.py -i "$vcf"
+    "$runGATK_path"/../tools/iqtree -s "${vcf%.vcf}.min4.phy" -m GTR -st DNA -bb 1000 -nt $thd
+    cp "${vcf%.vcf}.min4.phy.treefile" $pfx.newick
+    echo "[$(date +"%T")] the running ends ..."
+
+fi
+##END SCRIPT
